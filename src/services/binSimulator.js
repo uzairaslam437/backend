@@ -1,5 +1,6 @@
 const binModel = require('../models/bin');
 const websocketService = require('./websocketService');
+const binAssignmentService = require('./binAssignmentService');
 
 let intervalHandle = null;
 
@@ -60,6 +61,16 @@ async function tick() {
       // persist
       const updated = await binModel.updateBin(b.id, updatesForBin);
       updates.push(updated);
+
+      // Auto-assign if bin reaches 80% or above
+      if (fill >= 80 && b.fill_level < 80) {
+        console.log(`Bin ${b.id} reached ${fill}% - triggering auto-assignment`);
+        try {
+          await binAssignmentService.autoAssignBins(b.id);
+        } catch (assignError) {
+          console.error(`Failed to auto-assign bin ${b.id}:`, assignError);
+        }
+      }
     }
 
     if (updates.length > 0) {

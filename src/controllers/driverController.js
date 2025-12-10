@@ -4,6 +4,9 @@ const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 const { logSubAdminActivity } = require("../services/subAdminLogger");
+const binAssignmentModel = require("../models/binAssignment");
+const binAssignmentService = require("../services/binAssignmentService");
+const driverLocationModel = require("../models/driverLocation");
 
 /* -------------------------------------------------------
  * Helpers (DRY + validation)
@@ -170,7 +173,7 @@ const getDrivers = async (req, res) => {
   try {
     const role = req.user.role;
 
-    if (role === "admin" || role === "sub_admin"|| role === "super_admin") {
+    if (role === "admin" || role === "sub_admin" || role === "super_admin") {
       const q = await pool.query(`SELECT * FROM users WHERE role = 'driver'`);
       return res.status(200).json({
         message: "Drivers retrieved successfully",
@@ -198,7 +201,7 @@ const getDrivers = async (req, res) => {
 const updateDriver = async (req, res) => {
   try {
     const id = toInt(req.params.id, null);
-    ensureSelfOrRole(req.user, id, ["admin","sub_admin", "super_admin"]);
+    ensureSelfOrRole(req.user, id, ["admin", "sub_admin", "super_admin"]);
     if (id === null) return res.status(400).json({ message: "Driver ID is required" });
 
     await ensureDriverExists(id);
@@ -246,7 +249,7 @@ const updateDriver = async (req, res) => {
 
     const upd = await pool.query(sql, vals);
 
-    if(req.user.role === "sub_admin"){
+    if (req.user.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "UPDATE_DRIVER",
@@ -263,7 +266,7 @@ const updateDriver = async (req, res) => {
 
 const deleteDriver = async (req, res) => {
   try {
-    requireRole(req.user, ["admin","sub_admin", "super_admin"]);
+    requireRole(req.user, ["admin", "sub_admin", "super_admin"]);
 
     const id = toInt(req.params.id, null);
     if (id === null) return res.status(400).json({ message: "Driver ID is required" });
@@ -285,7 +288,7 @@ const deleteDriver = async (req, res) => {
 
 const assignWorkArea = async (req, res) => {
   try {
-    requireRole(req.user, ["admin","sub_admin", "super_admin"]);
+    requireRole(req.user, ["admin", "sub_admin", "super_admin"]);
 
     const { driverId, workAreaId, societyId } = req.body;
 
@@ -332,7 +335,7 @@ const getDriverWorkAreas = async (req, res) => {
 
     if (driverId === null) return res.status(400).json({ message: "Invalid driver id" });
 
-    ensureSelfOrRole(req.user, driverId, ["admin","sub_admin", "super_admin"]);
+    ensureSelfOrRole(req.user, driverId, ["admin", "sub_admin", "super_admin"]);
 
     const workAreas = [
       {
@@ -374,7 +377,7 @@ const getCollectionRoutes = async (req, res) => {
     const driverId = toInt(req.params.driverId, null);
     if (driverId === null) return res.status(400).json({ message: "Invalid driver id" });
 
-    ensureSelfOrRole(req.user, driverId, ["admin","sub_admin", "super_admin"]);
+    ensureSelfOrRole(req.user, driverId, ["admin", "sub_admin", "super_admin"]);
 
     // Stub data
     const routes = [
@@ -443,7 +446,7 @@ const updateTaskStatus = async (req, res) => {
       updated_at: new Date().toISOString()
     };
 
-    if(req.user.role === "sub_admin"){
+    if (req.user.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "UPDATE_TASK_STATUS",
@@ -466,7 +469,7 @@ const updateDriverLocation = async (req, res) => {
   try {
     requireRole(req.user, ["driver"]);
 
-    const { latitude, longitude, timestamp } = req.body;
+    const { latitude, longitude, accuracy, heading, speed } = req.body;
     if (typeof latitude !== "number" || typeof longitude !== "number") {
       return res.status(400).json({ message: "latitude and longitude are required as numbers" });
     }
@@ -480,27 +483,25 @@ const updateDriverLocation = async (req, res) => {
       return res.status(404).json({ message: "Driver not verified" });
     }
 
-    // Stub location payload
-    const locationData = {
-      driver_id: req.user.id,
+    // Save location to database
+    const locationData = await driverLocationModel.saveDriverLocation(
+      req.user.id,
       latitude,
       longitude,
-      timestamp: timestamp || new Date().toISOString(),
-      address: "Street 5, Sector A, Islamabad",
-      status: "active"
-    };
-
-    if(req.user.role === "sub_admin"){
-      await logSubAdminActivity({
-        subAdmin: req.user.id,
-        activityType: "UPDATE_DRIVER_LOCATION",
-        description: `Sub Admin ${req.user.id} updated driver location with email: ${email} ${Date.now()}`,
-      });
-    }
+      accuracy,
+      heading,
+      speed
+    );
 
     return res.status(200).json({
       message: "Location updated successfully",
-      location: locationData,
+      location: {
+        driver_id: locationData.driver_id,
+        latitude: parseFloat(locationData.latitude),
+        longitude: parseFloat(locationData.longitude),
+        recorded_at: locationData.recorded_at,
+        is_active: locationData.is_active
+      },
     });
   } catch (error) {
     const status = error.status || 500;
@@ -514,7 +515,7 @@ const getDriverPerformance = async (req, res) => {
     const driverId = toInt(req.params.driverId, null);
     if (driverId === null) return res.status(400).json({ message: "Invalid driver id" });
 
-    ensureSelfOrRole(req.user, driverId, ["admin","sub_admin", "super_admin"]);
+    ensureSelfOrRole(req.user, driverId, ["admin", "sub_admin", "super_admin"]);
 
     const periodDays = toInt(req.query.period, 30);
 
@@ -555,44 +556,43 @@ const getCurrentTasks = async (req, res) => {
   try {
     requireRole(req.user, ["driver"]);
 
-    // Stub tasks
-    const currentTasks = [
-      {
-        id: 1,
-        bin_id: "BIN_001",
-        task_type: "collection",
-        priority: "high",
-        status: "in_progress",
-        location: {
-          lat: 33.6844,
-          lng: 73.0479,
-          address: "House #123, Street 5, Sector A"
-        },
-        estimated_time: "30 minutes",
-        fill_level: 85,
-        assigned_at: "2024-01-20T08:00:00Z"
+    // Get real assignments from database
+    const assignments = await binAssignmentModel.getAssignmentsByDriver(
+      req.user.id,
+      null // Get all statuses except completed
+    );
+
+    // Filter out completed and cancelled
+    const activeTasks = assignments.filter(
+      a => a.status === 'pending' || a.status === 'in_progress'
+    );
+
+    // Format tasks for mobile app
+    const tasks = activeTasks.map(assignment => ({
+      id: assignment.id,
+      bin_id: assignment.bin_id,
+      bin_name: assignment.bin_name,
+      task_type: "collection",
+      priority: assignment.priority,
+      status: assignment.status,
+      location: {
+        lat: parseFloat(assignment.bin_latitude),
+        lng: parseFloat(assignment.bin_longitude),
+        address: assignment.bin_address
       },
-      {
-        id: 2,
-        bin_id: "BIN_007",
-        task_type: "maintenance",
-        priority: "medium",
-        status: "pending",
-        location: {
-          lat: 33.6850,
-          lng: 73.0485,
-          address: "Park Area, Sector A"
-        },
-        estimated_time: "15 minutes",
-        fill_level: 30,
-        assigned_at: "2024-01-20T09:00:00Z"
-      }
-    ];
+      fill_level: parseFloat(assignment.bin_fill_level),
+      estimated_time: assignment.estimated_time_minutes
+        ? `${assignment.estimated_time_minutes} minutes`
+        : "N/A",
+      distance_km: assignment.distance_km ? parseFloat(assignment.distance_km).toFixed(2) : null,
+      assigned_at: assignment.assigned_at,
+      society: assignment.bin_society
+    }));
 
     return res.status(200).json({
       message: "Current tasks retrieved successfully",
-      tasks: currentTasks,
-      count: currentTasks.length,
+      tasks,
+      count: tasks.length,
     });
   } catch (error) {
     const status = error.status || 500;
@@ -606,7 +606,7 @@ const getDriverSchedule = async (req, res) => {
     const driverId = toInt(req.params.driverId, null);
     if (driverId === null) return res.status(400).json({ message: "Invalid driver id" });
 
-    ensureSelfOrRole(req.user, driverId, ["admin","sub_admin", "super_admin"]);
+    ensureSelfOrRole(req.user, driverId, ["admin", "sub_admin", "super_admin"]);
 
     const targetDate = req.query.date || new Date().toISOString().split("T")[0];
 
@@ -649,8 +649,57 @@ const getDriverSchedule = async (req, res) => {
   }
 };
 
+const completeTask = async (req, res) => {
+  try {
+    requireRole(req.user, ["driver"]);
+
+    const taskId = toInt(req.params.taskId, null);
+    if (taskId === null) {
+      return res.status(400).json({ message: "taskId is required" });
+    }
+
+    const { notes, collection_weight } = req.body;
+
+    // Verify assignment belongs to this driver
+    const assignment = await binAssignmentModel.getAssignmentById(taskId);
+    if (!assignment) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+
+    if (assignment.driver_id !== req.user.id) {
+      return res.status(403).json({ message: "This task is not assigned to you" });
+    }
+
+    if (assignment.status === 'completed') {
+      return res.status(400).json({ message: "Task already completed" });
+    }
+
+    // Complete the assignment using the service
+    const completedAssignment = await binAssignmentService.completeAssignment(
+      taskId,
+      { notes, collection_weight }
+    );
+
+    return res.status(200).json({
+      message: "Task completed successfully",
+      task: {
+        id: completedAssignment.id,
+        bin_id: completedAssignment.bin_id,
+        status: completedAssignment.status,
+        completed_at: completedAssignment.completed_at,
+        notes: completedAssignment.notes,
+        collection_weight: completedAssignment.collection_weight
+      },
+    });
+  } catch (error) {
+    const status = error.status || 500;
+    console.error("Error completing task:", error);
+    return res.status(status).json({ message: error.message });
+  }
+};
+
 module.exports = {
-//addDriver,
+  //addDriver,
   getDrivers,
   updateDriver,
   deleteDriver,
@@ -661,5 +710,6 @@ module.exports = {
   updateDriverLocation,
   getDriverPerformance,
   getCurrentTasks,
-  getDriverSchedule
+  getDriverSchedule,
+  completeTask
 };

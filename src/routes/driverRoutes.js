@@ -1,6 +1,6 @@
 const express = require('express');
-const { getDrivers, updateDriver, deleteDriver , assignWorkArea , getDriverWorkAreas , getCollectionRoutes , getCurrentTasks , updateTaskStatus , updateDriverLocation , getDriverSchedule , getDriverPerformance} = require('../controllers/driverController');
-const { addAdminAndStaff} = require('../controllers/authController');
+const { getDrivers, updateDriver, deleteDriver, assignWorkArea, getDriverWorkAreas, getCollectionRoutes, getCurrentTasks, updateTaskStatus, updateDriverLocation, getDriverSchedule, getDriverPerformance, completeTask } = require('../controllers/driverController');
+const { addAdminAndStaff } = require('../controllers/authController');
 
 const router = express.Router();
 
@@ -17,5 +17,6 @@ router.put('/tasks/:taskId/status', updateTaskStatus);
 router.put('/location', updateDriverLocation);
 router.get('/:driverId/schedule', getDriverSchedule);
 router.get('/:driverId/performance', getDriverPerformance);
+router.put('/tasks/:taskId/complete', completeTask);
 
 module.exports = router;
