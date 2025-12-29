@@ -61,8 +61,15 @@ app.use("/sub-admin", verifyToken, subAdminRouter);
 app.use("/feedback/system", verifyToken, systemFeedbackRouter);
 app.use("/analytics/sentiment", verifyToken, sentimentAnalyticsRouter);
 
+const taskRouter = require("./routes/taskRoutes");
+const logRouter = require("./routes/logRoutes");
+
+// ...
+
 // Bins routes (requires authentication)
 app.use("/bins", verifyToken, binRouter);
+app.use("/tasks", verifyToken, taskRouter);
+app.use("/logs", verifyToken, logRouter);
 
 
 // Health endpoints

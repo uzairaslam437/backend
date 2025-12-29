@@ -270,8 +270,11 @@ class WebSocketService {
      */
     sendToUser(userId, event, data) {
         try {
-            const userSockets = this.userSockets.get(userId);
-            
+            // Support numeric or string keys
+            let userSockets = this.userSockets.get(userId);
+            if (!userSockets) userSockets = this.userSockets.get(String(userId));
+            if (!userSockets) userSockets = this.userSockets.get(Number(userId));
+
             if (userSockets && userSockets.size > 0) {
                 userSockets.forEach(socketId => {
                     const socket = this.io.sockets.sockets.get(socketId);
@@ -281,7 +284,6 @@ class WebSocketService {
                 });
                 return true;
             }
-            
             return false;
         } catch (error) {
             console.error('Error sending to user:', error);
@@ -311,6 +313,40 @@ class WebSocketService {
             return true;
         } catch (error) {
             console.error('Error sending to role:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Send a task assignment directly to a driver (by user id)
+     */
+    sendTaskAssignmentToDriver(driverId, data) {
+        try {
+            this.sendToUser(driverId, 'task:assigned', data);
+            return true;
+        } catch (error) {
+            console.error('Error sending task assignment to driver:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Broadcast driver location to society and admin roles
+     */
+    broadcastDriverLocation(driverId, societyId, locationData) {
+        try {
+            const payload = { driverId, ...locationData };
+            if (societyId) {
+                this.sendToSociety(societyId, 'drivers:update', payload);
+            }
+            // notify admins/super admins as well
+            this.sendToRole('admin', 'drivers:update', payload);
+            this.sendToRole('super_admin', 'drivers:update', payload);
+            // also send to the driver socket(s)
+            this.sendToUser(driverId, 'location:update', payload);
+            return true;
+        } catch (error) {
+            console.error('Error broadcasting driver location:', error);
             return false;
         }
     }

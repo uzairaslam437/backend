@@ -1,17 +1,18 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { pool } = require("../config/db");
+const groq = require('./groqService');
 
 class SentimentAnalysisService {
     constructor() {
-        if (process.env.GEMINI_API_KEY) {
-            this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            this.model = this.genAI.getGenerativeModel({
-                model: "gemini-2.5-flash" 
-            });
-            console.log("Sentiment Analysis Service initialized with Gemini");
+        if (process.env.GROQ_API_URL) {
+            this.provider = 'groq';
+            console.log('Sentiment Analysis Service initialized with Groq HTTP provider');
+        } else if (process.env.GEMINI_API_KEY) {
+            // legacy fallback (unlikely)
+            this.provider = 'gemini';
+            console.warn('GEMINI_API_KEY found. Legacy Gemini provider path is deprecated.');
         } else {
-            console.warn("GEMINI_API_KEY not found. Sentiment analysis will use fallback mode.");
-            this.model = null;
+            this.provider = null;
+            console.warn('No sentiment analysis provider configured. Using fallback analysis only.');
         }
     }
 
@@ -20,16 +21,39 @@ class SentimentAnalysisService {
             return this.fallbackAnalysis(ratings);
         }
 
-        if (this.model) {
+        if (this.provider === 'groq') {
             try {
                 const prompt = this.buildPrompt(comments, suggestions, ratings);
-                const result = await this.model.generateContent(prompt);
-                const response = await result.response;
-                const text = response.text();
+                const res = await groq.analyzeSentiment(prompt);
+                if (!res) return this.fallbackAnalysis(ratings);
 
-                return this.parseGeminiResponse(text);
+                // Expecting { sentiment, score } or full structure
+                if (res.sentiment && typeof res.score !== 'undefined') {
+                    return {
+                        sentiment_score: parseFloat(res.score),
+                        sentiment_label: res.sentiment,
+                        key_themes: res.key_themes || [],
+                        requires_urgent_attention: !!res.requires_urgent_attention,
+                        aspect_sentiments: res.aspect_sentiments || {},
+                        summary: res.summary || ''
+                    };
+                }
+
+                // If provider returned full analysis object attempt to normalize
+                if (res.sentiment_score || res.sentiment_label) {
+                    return {
+                        sentiment_score: this.validateScore(res.sentiment_score),
+                        sentiment_label: this.validateLabel(res.sentiment_label),
+                        key_themes: res.key_themes || [],
+                        requires_urgent_attention: !!res.requires_urgent_attention,
+                        aspect_sentiments: res.aspect_sentiments || {},
+                        summary: res.summary || ''
+                    };
+                }
+
+                return this.fallbackAnalysis(ratings);
             } catch (error) {
-                console.error("Gemini API error:", error.message);
+                console.error('Groq sentiment API error:', error);
                 return this.fallbackAnalysis(ratings);
             }
         }
@@ -79,6 +103,7 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
 }`;
     }
 
+    // keep legacy parse function name for compatibility (not used for Groq)
     parseGeminiResponse(text) {
         try {
             let jsonText = text.trim();

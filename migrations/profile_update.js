@@ -1,13 +1,17 @@
-// profile_update.js
-
 exports.up = async function (knex) {
-  return knex.schema.table("users", function (table) {
-    table.string("profile_picture"); // add profile_picture column
-  });
+  const exists = await knex.schema.hasColumn("users", "profile_picture");
+  if (!exists) {
+    await knex.schema.table("users", function (table) {
+      table.string("profile_picture");
+    });
+  }
 };
 
 exports.down = async function (knex) {
-  return knex.schema.table("users", function (table) {
-    table.dropColumn("profile_picture");
-  });
+  const exists = await knex.schema.hasColumn("users", "profile_picture");
+  if (exists) {
+    await knex.schema.table("users", function (table) {
+      table.dropColumn("profile_picture");
+    });
+  }
 };

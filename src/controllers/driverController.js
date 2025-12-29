@@ -7,6 +7,7 @@ const { logSubAdminActivity } = require("../services/subAdminLogger");
 const binAssignmentModel = require("../models/binAssignment");
 const binAssignmentService = require("../services/binAssignmentService");
 const driverLocationModel = require("../models/driverLocation");
+const websocketService = require("../services/websocketService");
 
 /* -------------------------------------------------------
  * Helpers (DRY + validation)
@@ -174,7 +175,21 @@ const getDrivers = async (req, res) => {
     const role = req.user.role;
 
     if (role === "admin" || role === "sub_admin" || role === "super_admin") {
-      const q = await pool.query(`SELECT * FROM users WHERE role = 'driver'`);
+      // Query to get drivers along with their latest location
+      // Using LATERAL join for PostgreSQL to get the most recent location per driver efficiently
+      const q = await pool.query(`
+        SELECT u.*, dl.latitude, dl.longitude, dl.recorded_at as last_location_update 
+        FROM users u 
+        LEFT JOIN LATERAL (
+          SELECT latitude, longitude, recorded_at 
+          FROM driver_locations 
+          WHERE driver_id = u.id 
+          ORDER BY recorded_at DESC 
+          LIMIT 1
+        ) dl ON true
+        WHERE u.role = 'driver'
+      `);
+
       return res.status(200).json({
         message: "Drivers retrieved successfully",
         drivers: q.rows,
@@ -183,6 +198,7 @@ const getDrivers = async (req, res) => {
     }
 
     if (role === "driver") {
+      // Similar join for single driver if needed, though usually they just update location
       const q = await pool.query(`SELECT * FROM users WHERE role = 'driver' AND id = $1`, [req.user.id]);
       return res.status(200).json({
         message: "Drivers retrieved successfully",
@@ -426,38 +442,95 @@ const getCollectionRoutes = async (req, res) => {
 const updateTaskStatus = async (req, res) => {
   try {
     requireRole(req.user, ["driver"]);
-
-    const taskId = req.params.taskId;
-    if (!taskId) return res.status(400).json({ message: "taskId is required" });
+    const taskId = toInt(req.params.taskId, null);
+    if (taskId === null) return res.status(400).json({ message: "taskId is required" });
 
     const { status, notes, completedAt, location } = req.body;
 
-    // Stub update
-    const updatedTask = {
-      id: taskId,
-      driver_id: req.user.id,
-      bin_id: "BIN_001",
-      status,
-      notes: notes || "",
-      started_at: "2024-01-20T08:00:00Z",
-      completed_at: completedAt || new Date().toISOString(),
-      location: location || { lat: 33.6844, lng: 73.0479 },
-      collection_weight: Math.floor(Math.random() * 50) + 10,
-      updated_at: new Date().toISOString()
-    };
-
-    if (req.user.role === "sub_admin") {
-      await logSubAdminActivity({
-        subAdmin: req.user.id,
-        activityType: "UPDATE_TASK_STATUS",
-        description: `Sub Admin ${req.user.id} updated task status ${Date.now()}`,
-      });
+    // Ensure the driver-task exists and belongs to this driver
+    const dtQ = `SELECT * FROM driver_tasks WHERE task_id = $1 AND driver_id = $2 LIMIT 1`;
+    const dtRes = await pool.query(dtQ, [taskId, req.user.id]);
+    if (dtRes.rowCount === 0) {
+      return res.status(404).json({ message: "Task not found for this driver" });
     }
 
-    return res.status(200).json({
-      message: "Task status updated successfully",
-      task: updatedTask,
-    });
+    const now = new Date().toISOString();
+    const updates = [];
+    const vals = [];
+    let idx = 1;
+
+    if (status) {
+      updates.push(`status = $${idx++}`);
+      vals.push(status);
+    }
+    if (notes !== undefined) {
+      updates.push(`notes = $${idx++}`);
+      vals.push(JSON.stringify(notes));
+    }
+    if (status === 'completed') {
+      updates.push(`completed_at = $${idx++}`);
+      vals.push(completedAt || now);
+    }
+
+    if (updates.length > 0) {
+      const updQ = `UPDATE driver_tasks SET ${updates.join(', ')}, assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP) WHERE task_id = $${idx} AND driver_id = $${idx + 1} RETURNING *`;
+      vals.push(taskId, req.user.id);
+      const updRes = await pool.query(updQ, vals);
+
+      // Update parent task status when completed
+      if (status === 'completed') {
+        await pool.query(`UPDATE tasks SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [taskId]);
+        // Reset the corresponding bin's fill level to 0 when task is completed
+        try {
+          const bRes = await pool.query(`SELECT bin_id FROM tasks WHERE id = $1 LIMIT 1`, [taskId]);
+          const binId = bRes.rows[0]?.bin_id;
+          if (binId) {
+            // Set fill_level to 0 and set status to 'filling' so simulator resumes
+            const updBinRes = await pool.query(`UPDATE bins SET fill_level = 0, status = 'filling', updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [binId]);
+            const updatedBin = updBinRes.rows[0];
+
+            // Notify connected clients in the society and admins/super admins
+            try {
+              if (updatedBin && updatedBin.society) {
+                websocketService.sendToSociety(updatedBin.society, 'bins:update', [updatedBin]);
+              }
+              websocketService.sendToRole('admin', 'bins:update', [updatedBin]);
+              websocketService.sendToRole('super_admin', 'bins:update', [updatedBin]);
+            } catch (wsErr) {
+              console.error('Failed to send websocket bin update', wsErr);
+            }
+          }
+        } catch (e) {
+          console.error('Failed to reset bin fill_level for task', taskId, e);
+        }
+      } else if (status) {
+        // reflect intermediate statuses if needed
+        await pool.query(`UPDATE tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [status, taskId]);
+      }
+
+      // Insert an event record
+      const eventPayload = {
+        status,
+        notes: notes || null,
+        location: location || null,
+        actor: req.user.id,
+      };
+      await pool.query(`INSERT INTO task_events (task_id, event_type, payload, created_by) VALUES ($1, $2, $3, $4)`, [taskId, status || 'updated', JSON.stringify(eventPayload), req.user.id]);
+
+      const updatedTask = updRes.rows[0];
+
+      if (req.user.role === "sub_admin") {
+        await logSubAdminActivity({
+          subAdmin: req.user.id,
+          activityType: "UPDATE_TASK_STATUS",
+          description: `Sub Admin ${req.user.id} updated task status ${Date.now()}`,
+        });
+      }
+
+      return res.status(200).json({ message: "Task status updated successfully", task: updatedTask });
+    }
+
+    return res.status(400).json({ message: "No valid fields to update" });
   } catch (error) {
     const status = error.status || 500;
     console.error("Error updating task status:", error);
@@ -473,25 +546,36 @@ const updateDriverLocation = async (req, res) => {
     if (typeof latitude !== "number" || typeof longitude !== "number") {
       return res.status(400).json({ message: "latitude and longitude are required as numbers" });
     }
-
     // Verify driver account is verified
     const driverVerified = await pool.query(
-      `SELECT 1 FROM users WHERE id = $1 AND is_verified = true`,
+      `SELECT 1, society_id FROM users WHERE id = $1 AND is_verified = true`,
       [req.user.id]
     );
     if (!driverVerified.rows.length) {
       return res.status(404).json({ message: "Driver not verified" });
     }
 
-    // Save location to database
-    const locationData = await driverLocationModel.saveDriverLocation(
-      req.user.id,
-      latitude,
-      longitude,
-      accuracy,
-      heading,
-      speed
-    );
+    // persist to driver_locations
+    const insertQ = `INSERT INTO driver_locations (driver_id, latitude, longitude, heading, speed, recorded_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`;
+    const recordedAt = timestamp || new Date().toISOString();
+    const insertRes = await pool.query(insertQ, [req.user.id, latitude, longitude, req.body.heading || null, req.body.speed || null, recordedAt]);
+    const locationData = insertRes.rows[0];
+
+    // broadcast to society and admins so dashboard updates in real-time
+    try {
+      const societyId = driverVerified.rows[0].society_id;
+      websocketService.broadcastDriverLocation(req.user.id, societyId, locationData);
+    } catch (e) {
+      console.error('Failed to broadcast driver location', e);
+    }
+
+    if (req.user.role === "sub_admin") {
+      await logSubAdminActivity({
+        subAdmin: req.user.id,
+        activityType: "UPDATE_DRIVER_LOCATION",
+        description: `Sub Admin ${req.user.id} updated driver location ${Date.now()}`,
+      });
+    }
 
     return res.status(200).json({
       message: "Location updated successfully",
@@ -518,33 +602,34 @@ const getDriverPerformance = async (req, res) => {
     ensureSelfOrRole(req.user, driverId, ["admin", "sub_admin", "super_admin"]);
 
     const periodDays = toInt(req.query.period, 30);
+    const since = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
 
-    // Stub data
+    // Count assigned tasks
+    const assignedQ = `SELECT COUNT(*)::int AS cnt FROM driver_tasks WHERE driver_id = $1 AND assigned_at >= $2`;
+    const assignedRes = await pool.query(assignedQ, [driverId, since]);
+    const totalAssigned = assignedRes.rows[0] ? assignedRes.rows[0].cnt : 0;
+
+    // Count completed tasks
+    const completedQ = `SELECT COUNT(*)::int AS cnt FROM driver_tasks WHERE driver_id = $1 AND status = 'completed' AND completed_at >= $2`;
+    const completedRes = await pool.query(completedQ, [driverId, since]);
+    const totalCompleted = completedRes.rows[0] ? completedRes.rows[0].cnt : 0;
+
+    // Average completion time (seconds)
+    const avgQ = `SELECT AVG(EXTRACT(EPOCH FROM (completed_at - assigned_at))) AS avg_seconds FROM driver_tasks WHERE driver_id = $1 AND status = 'completed' AND completed_at IS NOT NULL AND assigned_at IS NOT NULL AND completed_at >= $2`;
+    const avgRes = await pool.query(avgQ, [driverId, since]);
+    const avgSeconds = avgRes.rows[0] && avgRes.rows[0].avg_seconds ? parseFloat(avgRes.rows[0].avg_seconds) : null;
+
     const performanceData = {
       driver_id: driverId,
       period_days: periodDays,
       metrics: {
-        total_collections: Math.floor(Math.random() * 100) + 50,
-        on_time_collections: Math.floor(Math.random() * 80) + 45,
-        average_collection_time: "2.5 hours",
-        total_distance_covered: `${Math.floor(Math.random() * 500) + 200} km`,
-        fuel_efficiency: `${(Math.random() * 5 + 10).toFixed(1)} km/l`,
-        customer_rating: (Math.random() * 2 + 3).toFixed(1),
-        complaints: Math.floor(Math.random() * 5),
-        commendations: Math.floor(Math.random() * 10) + 2
-      },
-      weekly_breakdown: [
-        { week: "Week 1", collections: 18, rating: 4.2 },
-        { week: "Week 2", collections: 20, rating: 4.5 },
-        { week: "Week 3", collections: 17, rating: 4.1 },
-        { week: "Week 4", collections: 19, rating: 4.3 }
-      ]
+        total_assigned: parseInt(totalAssigned || 0, 10),
+        total_completed: parseInt(totalCompleted || 0, 10),
+        average_completion_time_seconds: avgSeconds,
+      }
     };
 
-    return res.status(200).json({
-      message: "Performance metrics retrieved successfully",
-      performance: performanceData,
-    });
+    return res.status(200).json({ message: "Performance metrics retrieved successfully", performance: performanceData });
   } catch (error) {
     const status = error.status || 500;
     console.error("Error fetching performance metrics:", error);
@@ -587,6 +672,67 @@ const getCurrentTasks = async (req, res) => {
       distance_km: assignment.distance_km ? parseFloat(assignment.distance_km).toFixed(2) : null,
       assigned_at: assignment.assigned_at,
       society: assignment.bin_society
+    }));
+    // DEBUG: log authenticated user info to help diagnose missing tasks
+    try {
+      console.log('getCurrentTasks called by user:', {
+        id: req.user?.id,
+        role: req.user?.role,
+        tokenPayload: req.user,
+        query: req.query,
+        params: req.params,
+      });
+    } catch (e) {
+      console.log('Error logging getCurrentTasks debug info', e);
+    }
+
+    // Query real tasks assigned to this driver
+    const q = `
+      SELECT
+        dt.id as driver_task_id,
+        dt.task_id,
+        COALESCE(dt.status, 'assigned') as driver_task_status,
+        dt.assigned_at,
+        dt.accepted_at,
+        dt.completed_at,
+        t.id as id,
+        t.bin_id,
+        t.fill_level,
+        t.priority,
+        t.status as task_status,
+        t.notes as task_notes,
+        t.created_at as task_created_at,
+        b.name as bin_name,
+        b.address as bin_address,
+        b.latitude as bin_latitude,
+        b.longitude as bin_longitude
+      FROM driver_tasks dt
+      JOIN tasks t ON dt.task_id = t.id
+      LEFT JOIN bins b ON t.bin_id = b.id
+      WHERE dt.driver_id = $1
+        AND COALESCE(dt.status, 'assigned') != 'completed'
+      ORDER BY dt.assigned_at DESC
+    `;
+
+    const result = await pool.query(q, [req.user.id]);
+
+    const currentTasks = result.rows.map((r) => ({
+      id: r.id,
+      driver_task_id: r.driver_task_id,
+      bin_id: r.bin_name || `BIN_${r.bin_id}`,
+      task_type: (r.task_notes && r.task_notes.type) || 'collection',
+      priority: r.priority || 'normal',
+      status: r.driver_task_status || r.task_status || 'assigned',
+      location: {
+        lat: r.bin_latitude || null,
+        lng: r.bin_longitude || null,
+        address: r.bin_address || null,
+      },
+      estimated_time: (r.task_notes && r.task_notes.estimated_time) || null,
+      fill_level: r.fill_level || 0,
+      assigned_at: r.assigned_at,
+      accepted_at: r.accepted_at,
+      completed_at: r.completed_at,
     }));
 
     return res.status(200).json({
