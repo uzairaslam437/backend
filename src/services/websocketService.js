@@ -63,6 +63,11 @@ class WebSocketService {
                 this.handleMessage(socket, data);
             });
 
+            // Handle driver location update
+            socket.on('driver:update-location', (data) => {
+                this.handleDriverLocationUpdate(socket, data);
+            });
+
             // Handle disconnect
             socket.on('disconnect', () => {
                 this.handleDisconnect(socket);
@@ -164,10 +169,10 @@ class WebSocketService {
 
             // Leave previous society room if any
             socket.leaveAll();
-            
+
             // Join new society room
             socket.join(`society_${societyId}`);
-            
+
             // Rejoin user and role rooms
             socket.join(`user_${userInfo.userId}`);
             socket.join(`role_${userInfo.role}`);
@@ -247,7 +252,7 @@ class WebSocketService {
                 const userSockets = this.userSockets.get(userInfo.userId);
                 if (userSockets) {
                     userSockets.delete(socket.id);
-                    
+
                     // If no more sockets for this user, remove the entry
                     if (userSockets.size === 0) {
                         this.userSockets.delete(userInfo.userId);
@@ -335,7 +340,7 @@ class WebSocketService {
      */
     broadcastDriverLocation(driverId, societyId, locationData) {
         try {
-            const payload = { driverId, ...locationData };
+            const payload = { driverId, societyId, ...locationData };
             if (societyId) {
                 this.sendToSociety(societyId, 'drivers:update', payload);
             }
@@ -532,6 +537,48 @@ class WebSocketService {
         } catch (err) {
             console.error("DB error:", err.message);
             socket.emit("messageSent", { success: false, error: err.message });
+        }
+    }
+
+    /**
+     * Handle driver location update
+     */
+    async handleDriverLocationUpdate(socket, data) {
+        try {
+            const { latitude, longitude } = data;
+            // socket.user is set in handleJWTConnection or via authentication event
+            const driverId = socket.user?.id || this.connectedUsers.get(socket.id)?.userId;
+
+            if (!driverId) {
+                console.error('Driver location update received but no user identified for socket:', socket.id);
+                return;
+            }
+
+            if (!latitude || !longitude) {
+                return;
+            }
+
+            // Insert into historical log
+            await pool.query(
+                `INSERT INTO driver_locations (driver_id, latitude, longitude, recorded_at)
+                 VALUES ($1, $2, $3, NOW())`,
+                [driverId, latitude, longitude]
+            );
+
+            // Update current location in users table for quick lookups
+            await pool.query(
+                `UPDATE users SET latitude = $1, longitude = $2, last_location_update = NOW() WHERE id = $3 RETURNING society_id`,
+                [latitude, longitude, driverId]
+            );
+
+            // Get society_id for broadcasting
+            const userRes = await pool.query('SELECT society_id FROM users WHERE id = $1', [driverId]);
+            const societyId = userRes.rows[0]?.society_id;
+
+            this.broadcastDriverLocation(driverId, societyId, { latitude, longitude });
+
+        } catch (error) {
+            console.error('Error handling driver location update:', error);
         }
     }
 

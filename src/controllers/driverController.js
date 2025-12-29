@@ -557,9 +557,15 @@ const updateDriverLocation = async (req, res) => {
 
     // persist to driver_locations
     const insertQ = `INSERT INTO driver_locations (driver_id, latitude, longitude, heading, speed, recorded_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`;
-    const recordedAt = timestamp || new Date().toISOString();
-    const insertRes = await pool.query(insertQ, [req.user.id, latitude, longitude, req.body.heading || null, req.body.speed || null, recordedAt]);
+    const recordedAt = req.body.timestamp || new Date().toISOString();
+    const insertRes = await pool.query(insertQ, [req.user.id, latitude, longitude, heading || null, speed || null, recordedAt]);
     const locationData = insertRes.rows[0];
+
+    // Update current location in users table for quick lookups
+    await pool.query(
+      `UPDATE users SET latitude = $1, longitude = $2, last_location_update = NOW() WHERE id = $3`,
+      [latitude, longitude, req.user.id]
+    );
 
     // broadcast to society and admins so dashboard updates in real-time
     try {
@@ -583,8 +589,7 @@ const updateDriverLocation = async (req, res) => {
         driver_id: locationData.driver_id,
         latitude: parseFloat(locationData.latitude),
         longitude: parseFloat(locationData.longitude),
-        recorded_at: locationData.recorded_at,
-        is_active: locationData.is_active
+        recorded_at: locationData.recorded_at
       },
     });
   } catch (error) {

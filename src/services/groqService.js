@@ -81,10 +81,13 @@ async function callGroq(prompt) {
 
 function buildDriverPrompt(context) {
   const { bin, drivers } = context || {};
-  const driversList = (drivers || []).map(d => `- id: ${d.id}, name: ${d.name || (d.first_name + ' ' + (d.last_name||''))}, latitude: ${d.latitude}, longitude: ${d.longitude}, active_tasks: ${d.active_tasks}`).join('\n');
+  const driversList = (drivers || []).map(d => `- id: ${d.id}, name: ${d.name || (d.first_name + ' ' + (d.last_name || ''))}, latitude: ${d.latitude}, longitude: ${d.longitude}, active_tasks: ${d.active_tasks}`).join('\n');
   const allowedIds = (drivers || []).map(d => d.id).join(', ');
 
-  return `You are a strict decision engine for assigning one driver to empty a bin.\n\nCONTEXT:\nBin: ${JSON.stringify(bin)}\n\nCANDIDATE DRIVERS:\n${driversList}\n\nREQUIREMENTS:\n- Choose exactly one driver from the candidate list above. Use the driver's exact id value as provided in the list.\n- The returned JSON MUST be the ONLY content in the response (no explanations, no markdown, no code fences).\n- Return EXACTLY this JSON shape:\n  { "driver_id": <one of: ${allowedIds} | null>, "reason": "brief explanation (max 30 words)" }\n- If no suitable driver, set "driver_id" to null and provide a short reason.\n\nEXAMPLE:\n  { "driver_id": ${allowedIds.split(', ')[0] || 'null'}, "reason": "Closest available driver in same society" }\n\nReturn only the JSON object.`;
+  return `You are a strict decision engine for assigning one driver to empty a bin.\n\nCONTEXT:\nBin: ${JSON.stringify(bin)}\n\nCANDIDATE DRIVERS:\n${driversList}\n\nREQUIREMENTS:\n- Choose exactly one driver from the candidate 
+  list above.\n- PRIORITIZE PROXIMITY: Calculate rough distances based on latitude/longitude. Choose the driver closest to the bin who has low active tasks.\n- If a driver is very far (>20km) avoid them unless no one else is available.\n- The returned JSON MUST be the ONLY content.\n- Return EXACTLY this JSON shape:\n  { "driver_id":
+   <one of: ${allowedIds} | null>, "reason": "brief explanation (max 30 words)" }\n- If no suitable driver, set "driver_id" to null.\n\nEXAMPLE:\n  { "driver_id": ${allowedIds.split(', ')[0] || 'null'}, "reason": 
+   "Closest available driver (0.5km away)" }\n\nReturn only the JSON object.`;
 }
 
 async function getOptimalDriver(context) {

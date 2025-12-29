@@ -20,7 +20,7 @@ async function createTask(req, res) {
     }
 
     const insertQ = `INSERT INTO tasks (bin_id, society_id, fill_level, priority, notes, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING *`;
-    const insertRes = await pool.query(insertQ, [bin_id, society_id, fill_level || 0, priority || 'normal', notes ? JSON.stringify(notes) : '{}' ]);
+    const insertRes = await pool.query(insertQ, [bin_id, society_id, fill_level || 0, priority || 'normal', notes ? JSON.stringify(notes) : '{}']);
     const task = insertRes.rows[0];
 
     // attempt auto-assign with websocket notification
@@ -107,9 +107,16 @@ async function postDriverLocation(req, res) {
 
     if (!latitude || !longitude) return res.status(400).json({ success: false, message: 'latitude and longitude required' });
 
+    const recordedAt = req.body.timestamp || new Date().toISOString();
     const insertQ = `INSERT INTO driver_locations (driver_id, latitude, longitude, heading, speed, recorded_at) 
-                     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) RETURNING *`;
-    const insertRes = await pool.query(insertQ, [driverId, latitude, longitude, heading, speed]);
+                     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`;
+    const insertRes = await pool.query(insertQ, [driverId, latitude, longitude, heading || null, speed || null, recordedAt]);
+
+    // Update current location in users table for quick lookups
+    await pool.query(
+      `UPDATE users SET latitude = $1, longitude = $2, last_location_update = NOW() WHERE id = $3`,
+      [latitude, longitude, driverId]
+    );
 
     // Get driver's society to broadcast location
     const driverQ = `SELECT society_id FROM users WHERE id = $1`;
@@ -205,10 +212,10 @@ async function getTaskDetails(req, res) {
   }
 }
 
-module.exports = { 
-  createTask, 
-  getDriverTasks, 
-  updateTaskStatus, 
+module.exports = {
+  createTask,
+  getDriverTasks,
+  updateTaskStatus,
   postDriverLocation,
   getSocietyDriverLocations,
   getAllDriverLocations,

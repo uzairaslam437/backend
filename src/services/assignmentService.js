@@ -9,7 +9,7 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
@@ -40,7 +40,7 @@ function isDriverOnline(recordedAt) {
 
 async function findBestDriverAI(societyId, binLat, binLon, fillLevel) {
   let candidates = await getCandidateDrivers(societyId);
-  
+
   if (!candidates || candidates.length === 0) return null;
   // Build full driver list to send to Gemini, include drivers even if they lack recent location
   const driversForAI = [];
@@ -74,7 +74,7 @@ async function findBestDriverAI(societyId, binLat, binLon, fillLevel) {
   console.log("Requesting AI (Groq) for optimal driver...");
   const aiResult = await groqService.getOptimalDriver(context);
   console.log("🤖 Groq AI Response:", JSON.stringify(aiResult, null, 2));
-  
+
   if (aiResult && aiResult.driver_id) {
     // Find selected driver from the full candidate list (may lack live location)
     const candidate = driversForAI.find(c => c.id == aiResult.driver_id) || null;
@@ -107,23 +107,19 @@ async function findBestDriver(societyId, binLat, binLon) {
   for (const d of candidates) {
     let loc = await getLatestLocation(d.id);
     const workload = await getActiveTaskCount(d.id);
-    
+
     // MOCK LOCATION FALLBACK (User Request for Testing)
+    // MOCK LOCATION FALLBACK REMOVED - Using Real-Time Data
     if (!loc || !loc.latitude) {
-        // Mocking a location near Islamabad/User's area for testing
-        // Or simply use the bin's location slightly offset to ensure they are "close"
-        loc = { 
-            latitude: 33.6844, 
-            longitude: 73.0479, 
-            recorded_at: new Date() 
-        };
-        console.log(`[DEBUG] ⚠️ No real location for Driver ${d.id}. Using MOCK location.`);
+      // Driver has no location history yet
+      console.log(`[DEBUG] ⚠️ No location data for Driver ${d.id}. Skipping.`);
+      continue;
     }
 
     // TEMPORARILY DISABLED ONLINE CHECK
     // if (!loc || !loc.latitude || !loc.longitude || !isDriverOnline(loc.recorded_at)) {
     if (!loc || !loc.latitude || !loc.longitude) {
-        continue;
+      continue;
     }
 
     let distance = 99999;
@@ -178,8 +174,8 @@ async function assignTask(taskId, assignedBy = null, wsService = null) {
 
   await pool.query(`UPDATE tasks SET status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [taskId]);
 
-  const payload = { 
-    assigned_to: best.driver.id, 
+  const payload = {
+    assigned_to: best.driver.id,
     distance_km: best.distance || 'N/A',
     workload: best.workload || 'N/A',
     driver_location: { latitude: best.driver.latitude, longitude: best.driver.longitude },
@@ -216,8 +212,8 @@ async function checkAndCreateTask(bin, websocketService) {
       let society_id = null;
       if (typeof bin.society === 'number') society_id = bin.society;
       else if (bin.society) {
-          const sRes = await pool.query(`SELECT id FROM societies WHERE society_name = $1 LIMIT 1`, [bin.society]);
-          if (sRes.rows[0]) society_id = sRes.rows[0].id;
+        const sRes = await pool.query(`SELECT id FROM societies WHERE society_name = $1 LIMIT 1`, [bin.society]);
+        if (sRes.rows[0]) society_id = sRes.rows[0].id;
       }
 
       const insertQ = `INSERT INTO tasks (bin_id, society_id, fill_level, priority, notes, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`;
@@ -228,31 +224,31 @@ async function checkAndCreateTask(bin, websocketService) {
       console.log(`[DEBUG] Calling assignTask for Task ${newTask.id}...`);
       assignTask(newTask.id, null, websocketService)
         .then(result => {
-           if (result) console.log(`[DEBUG] ✅ Auto-assigned task ${newTask.id} to driver ${result.driver.id}`);
-           else console.log(`[DEBUG] ⚠️ Could not auto-assign task ${newTask.id} immediately.`);
+          if (result) console.log(`[DEBUG] ✅ Auto-assigned task ${newTask.id} to driver ${result.driver.id}`);
+          else console.log(`[DEBUG] ⚠️ Could not auto-assign task ${newTask.id} immediately.`);
         })
         .catch(err => console.error("[DEBUG] ❌ Error in auto-assignment:", err));
-        
+
       return newTask;
     } else {
-        const existingTask = activeTaskRes.rows[0];
-        console.log(`[DEBUG] Active task found for Bin ${bin.id} (Task #${existingTask.id}, Status: ${existingTask.status}).`);
-        
-        // RETRY Logic: If status is 'created', it means previous assignment failed. Retry now.
-        if (existingTask.status === 'created') {
-             console.log(`[DEBUG] 🔄 Task #${existingTask.id} is 'created' but not assigned. Retrying assignment...`);
-             assignTask(existingTask.id, null, websocketService)
-              .then(result => {
-                 if (result) console.log(`[DEBUG] ✅ Retry-assigned task ${existingTask.id} to driver ${result.driver.id}`);
-                 else console.log(`[DEBUG] ⚠️ Retry assignment failed for task ${existingTask.id}.`);
-              })
-              .catch(err => console.error("[DEBUG] ❌ Error in retry-assignment:", err));
-        }
-        
-        return null;
+      const existingTask = activeTaskRes.rows[0];
+      console.log(`[DEBUG] Active task found for Bin ${bin.id} (Task #${existingTask.id}, Status: ${existingTask.status}).`);
+
+      // RETRY Logic: If status is 'created', it means previous assignment failed. Retry now.
+      if (existingTask.status === 'created') {
+        console.log(`[DEBUG] 🔄 Task #${existingTask.id} is 'created' but not assigned. Retrying assignment...`);
+        assignTask(existingTask.id, null, websocketService)
+          .then(result => {
+            if (result) console.log(`[DEBUG] ✅ Retry-assigned task ${existingTask.id} to driver ${result.driver.id}`);
+            else console.log(`[DEBUG] ⚠️ Retry assignment failed for task ${existingTask.id}.`);
+          })
+          .catch(err => console.error("[DEBUG] ❌ Error in retry-assignment:", err));
+      }
+
+      return null;
     }
   } else {
-      // console.log(`[DEBUG] Bin ${bin.id} level ${level}% below threshold (90%).`); 
+    // console.log(`[DEBUG] Bin ${bin.id} level ${level}% below threshold (90%).`); 
   }
   return null;
 }
@@ -272,15 +268,15 @@ async function checkAndCompleteTask(bin, websocketService) {
       console.log(`[DEBUG] Bin ${bin.id} emptied (Level ${level}%). Completing active Task #${task.id}...`);
 
       await pool.query(`UPDATE tasks SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [task.id]);
-      
+
       if (task.driver_id) {
-         await pool.query(`UPDATE driver_tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE task_id = $1 AND driver_id = $2`, [task.id, task.driver_id]);
+        await pool.query(`UPDATE driver_tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE task_id = $1 AND driver_id = $2`, [task.id, task.driver_id]);
       } else {
-         await pool.query(`UPDATE driver_tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE task_id = $1`, [task.id]);
+        await pool.query(`UPDATE driver_tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE task_id = $1`, [task.id]);
       }
 
-      const payload = { 
-        completion_type: 'auto_sensed', 
+      const payload = {
+        completion_type: 'auto_sensed',
         final_fill_level: level,
         note: 'Bin sensor reported empty.'
       };
@@ -290,7 +286,7 @@ async function checkAndCompleteTask(bin, websocketService) {
       console.log(`[DEBUG] ✅ Task #${task.id} marked as completed.`);
 
       if (websocketService) {
-         websocketService.sendToAll('tasks:updated', { id: task.id, status: 'completed', bin_id: bin.id });
+        websocketService.sendToAll('tasks:updated', { id: task.id, status: 'completed', bin_id: bin.id });
       }
       return true;
     }
