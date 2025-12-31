@@ -565,14 +565,11 @@ class WebSocketService {
                 [driverId, latitude, longitude]
             );
 
-            /* 
             // Update current location in users table for quick lookups
-            // (Disabled: latitude/longitude columns do not exist on users table)
             await pool.query(
                 `UPDATE users SET latitude = $1, longitude = $2, last_location_update = NOW() WHERE id = $3 RETURNING society_id`,
                 [latitude, longitude, driverId]
             );
-            */
 
             // Get society_id for broadcasting
             const userRes = await pool.query('SELECT society_id FROM users WHERE id = $1', [driverId]);

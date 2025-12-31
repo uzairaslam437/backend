@@ -445,91 +445,88 @@ const updateTaskStatus = async (req, res) => {
     if (taskId === null) return res.status(400).json({ message: "taskId is required" });
 
     const { status, notes, completedAt, location } = req.body;
+    let updatedEntity = null;
+    let entityType = 'unknown';
 
-    // Ensure the driver-task exists and belongs to this driver
-    const dtQ = `SELECT * FROM driver_tasks WHERE task_id = $1 AND driver_id = $2 LIMIT 1`;
-    const dtRes = await pool.query(dtQ, [taskId, req.user.id]);
-    if (dtRes.rowCount === 0) {
-      return res.status(404).json({ message: "Task not found for this driver" });
-    }
+    // 1. Try to find in bin_assignments first (User's preferred method)
+    const ba = await binAssignmentModel.getAssignmentById(taskId);
 
-    const now = new Date().toISOString();
-    const updates = [];
-    const vals = [];
-    let idx = 1;
+    if (ba && ba.driver_id === req.user.id) {
+      // It is a bin assignment
+      entityType = 'bin_assignment';
+      updatedEntity = await binAssignmentModel.updateAssignmentStatus(taskId, status, {
+        notes: notes ? JSON.stringify(notes) : null,
+        completed_at: status === 'completed' ? (completedAt || new Date().toISOString()) : null
+      });
 
-    if (status) {
-      updates.push(`status = $${idx++}`);
-      vals.push(status);
-    }
-    if (notes !== undefined) {
-      updates.push(`notes = $${idx++}`);
-      vals.push(JSON.stringify(notes));
-    }
-    if (status === 'completed') {
-      updates.push(`completed_at = $${idx++}`);
-      vals.push(completedAt || now);
-    }
-
-    if (updates.length > 0) {
-      const updQ = `UPDATE driver_tasks SET ${updates.join(', ')}, assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP) WHERE task_id = $${idx} AND driver_id = $${idx + 1} RETURNING *`;
-      vals.push(taskId, req.user.id);
-      const updRes = await pool.query(updQ, vals);
-
-      // Update parent task status when completed
-      if (status === 'completed') {
-        await pool.query(`UPDATE tasks SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [taskId]);
-        // Reset the corresponding bin's fill level to 0 when task is completed
+      // Handle Bin Reset if completed
+      if (status === 'completed' && ba.bin_id) {
         try {
-          const bRes = await pool.query(`SELECT bin_id FROM tasks WHERE id = $1 LIMIT 1`, [taskId]);
-          const binId = bRes.rows[0]?.bin_id;
-          if (binId) {
-            // Set fill_level to 0 and set status to 'filling' so simulator resumes
-            const updBinRes = await pool.query(`UPDATE bins SET fill_level = 0, status = 'filling', updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [binId]);
-            const updatedBin = updBinRes.rows[0];
+          // Reset bin fill level
+          const updBinRes = await pool.query(`UPDATE bins SET fill_level = 0, status = 'filling', updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [ba.bin_id]);
+          const updatedBin = updBinRes.rows[0];
 
-            // Notify connected clients in the society and admins/super admins
-            try {
-              if (updatedBin && updatedBin.society) {
-                websocketService.sendToSociety(updatedBin.society, 'bins:update', [updatedBin]);
-              }
-              websocketService.sendToRole('admin', 'bins:update', [updatedBin]);
-              websocketService.sendToRole('super_admin', 'bins:update', [updatedBin]);
-            } catch (wsErr) {
-              console.error('Failed to send websocket bin update', wsErr);
+          // Notify
+          if (updatedBin && updatedBin.society) {
+            websocketService.sendToSociety(updatedBin.society, 'bins:update', [updatedBin]);
+          }
+          websocketService.sendToRole('admin', 'bins:update', [updatedBin]);
+          websocketService.sendToRole('super_admin', 'bins:update', [updatedBin]);
+        } catch (e) {
+          console.error('Failed to reset bin for assignment', taskId, e);
+        }
+      }
+    } else {
+      // 2. Fallback to driver_tasks (Legacy/Service Requests)
+      const dtQ = `SELECT * FROM driver_tasks WHERE task_id = $1 AND driver_id = $2 LIMIT 1`;
+      const dtRes = await pool.query(dtQ, [taskId, req.user.id]);
+
+      if (dtRes.rowCount > 0) {
+        entityType = 'driver_task';
+
+        const now = new Date().toISOString();
+        const updates = [];
+        const vals = [];
+        let idx = 1;
+
+        if (status) {
+          updates.push(`status = $${idx++}`);
+          vals.push(status);
+        }
+        if (notes !== undefined) {
+          updates.push(`notes = $${idx++}`);
+          vals.push(JSON.stringify(notes));
+        }
+        if (status === 'completed') {
+          updates.push(`completed_at = $${idx++}`);
+          vals.push(completedAt || now);
+        }
+
+        if (updates.length > 0) {
+          const updQ = `UPDATE driver_tasks SET ${updates.join(', ')}, assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP) WHERE task_id = $${idx} AND driver_id = $${idx + 1} RETURNING *`;
+          vals.push(taskId, req.user.id);
+          const updRes = await pool.query(updQ, vals);
+          updatedEntity = updRes.rows[0];
+
+          // Update parent task/bin logic (only if it was a task, not SR)
+          if (status === 'completed') {
+            await pool.query(`UPDATE tasks SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [taskId]);
+            // Reset bin if linked
+            const bRes = await pool.query(`SELECT bin_id FROM tasks WHERE id = $1 LIMIT 1`, [taskId]);
+            if (bRes.rows[0]?.bin_id) {
+              await pool.query(`UPDATE bins SET fill_level = 0, status = 'filling', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [bRes.rows[0].bin_id]);
             }
           }
-        } catch (e) {
-          console.error('Failed to reset bin fill_level for task', taskId, e);
         }
-      } else if (status) {
-        // reflect intermediate statuses if needed
-        await pool.query(`UPDATE tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [status, taskId]);
       }
-
-      // Insert an event record
-      const eventPayload = {
-        status,
-        notes: notes || null,
-        location: location || null,
-        actor: req.user.id,
-      };
-      await pool.query(`INSERT INTO task_events (task_id, event_type, payload, created_by) VALUES ($1, $2, $3, $4)`, [taskId, status || 'updated', JSON.stringify(eventPayload), req.user.id]);
-
-      const updatedTask = updRes.rows[0];
-
-      if (req.user.role === "sub_admin") {
-        await logSubAdminActivity({
-          subAdmin: req.user.id,
-          activityType: "UPDATE_TASK_STATUS",
-          description: `Sub Admin ${req.user.id} updated task status ${Date.now()}`,
-        });
-      }
-
-      return res.status(200).json({ message: "Task status updated successfully", task: updatedTask });
     }
 
-    return res.status(400).json({ message: "No valid fields to update" });
+    if (!updatedEntity) {
+      return res.status(404).json({ message: "Task not found associated with this driver" });
+    }
+
+    return res.status(200).json({ message: "Task status updated successfully", task: updatedEntity, type: entityType });
+
   } catch (error) {
     const status = error.status || 500;
     console.error("Error updating task status:", error);
@@ -659,57 +656,38 @@ const getCurrentTasks = async (req, res) => {
       console.log('Error logging getCurrentTasks debug info', e);
     }
 
-    // Query real tasks assigned to this driver
-    const q = `
-      SELECT
-        dt.id as driver_task_id,
-        dt.task_id,
-        COALESCE(dt.status, 'assigned') as driver_task_status,
-        dt.assigned_at,
-        dt.accepted_at,
-        dt.completed_at,
-        t.id as id,
-        t.bin_id,
-        t.fill_level,
-        t.priority,
-        t.status as task_status,
-        t.notes as task_notes,
-        t.created_at as task_created_at,
-        b.name as bin_name,
-        b.address as bin_address,
-        b.latitude as bin_latitude,
-        b.longitude as bin_longitude
-      FROM driver_tasks dt
-      JOIN tasks t ON dt.task_id = t.id
-      LEFT JOIN bins b ON t.bin_id = b.id
-      WHERE dt.driver_id = $1
-        AND COALESCE(dt.status, 'assigned') != 'completed'
-      ORDER BY dt.assigned_at DESC
-    `;
+    // 1. Fetch Bin Assignments (from bin_assignments table)
+    const assignments = await binAssignmentModel.getAssignmentsByDriver(
+      req.user.id,
+      null // Get all statuses
+    );
 
-    const result = await pool.query(q, [req.user.id]);
+    // Filter out completed and cancelled
+    const activeAssignments = assignments.filter(
+      a => a.status === 'pending' || a.status === 'in_progress'
+    );
 
-    const binTasks = result.rows.map((r) => ({
-      id: r.id, // Task ID
-      driver_task_id: r.driver_task_id,
-      bin_id: r.bin_name || `BIN_${r.bin_id}`,
-      task_type: (r.task_notes && r.task_notes.type) || 'collection',
-      priority: r.priority || 'normal',
-      status: r.driver_task_status || r.task_status || 'assigned',
+    const binTasks = activeAssignments.map(assignment => ({
+      id: assignment.id,
+      driver_task_id: assignment.id, // using assignment id as task id
+      bin_id: assignment.bin_name || `BIN_${assignment.bin_id}`,
+      task_type: "collection",
+      priority: assignment.priority || 'normal',
+      status: assignment.status,
       location: {
-        lat: r.bin_latitude || null,
-        lng: r.bin_longitude || null,
-        address: r.bin_address || null,
+        lat: assignment.bin_latitude ? parseFloat(assignment.bin_latitude) : null,
+        lng: assignment.bin_longitude ? parseFloat(assignment.bin_longitude) : null,
+        address: assignment.bin_address
       },
-      estimated_time: (r.task_notes && r.task_notes.estimated_time) || null,
-      fill_level: r.fill_level || 0,
-      assigned_at: r.assigned_at,
-      accepted_at: r.accepted_at,
-      completed_at: r.completed_at,
-      origin: 'bin' // helper flag
+      estimated_time: assignment.estimated_time_minutes
+        ? `${assignment.estimated_time_minutes} minutes`
+        : "N/A",
+      fill_level: assignment.bin_fill_level ? parseFloat(assignment.bin_fill_level) : 0,
+      assigned_at: assignment.assigned_at,
+      origin: 'bin'
     }));
 
-    // Fetch Assigned Service Requests
+    // 2. Fetch Service Request Tasks (keep existing logic)
     const srQ = `
       SELECT sr.*, ua.street_address, ua.city, ua.latitude, ua.longitude
       FROM service_requests sr
@@ -720,9 +698,9 @@ const getCurrentTasks = async (req, res) => {
     const srRes = await pool.query(srQ, [req.user.id]);
 
     const serviceRequestTasks = srRes.rows.map(sr => ({
-      id: sr.id, // Service Request ID
-      driver_task_id: `SR-${sr.id}`, // Virtual ID
-      bin_id: sr.request_number, // Display as ID
+      id: sr.id,
+      driver_task_id: `SR-${sr.id}`,
+      bin_id: sr.request_number,
       task_type: 'service_request',
       priority: sr.priority || 'normal',
       status: sr.status,
@@ -732,14 +710,17 @@ const getCurrentTasks = async (req, res) => {
         address: `${sr.street_address}, ${sr.city}`
       },
       estimated_time: 'On Demand',
-      fill_level: sr.estimated_weight || 0, // Reuse field for weight
+      fill_level: sr.estimated_weight || 0,
       assigned_at: sr.updated_at,
-      origin: 'service_request', // helper flag
+      origin: 'service_request',
       title: sr.title,
       description: sr.description
     }));
 
     const tasks = [...binTasks, ...serviceRequestTasks];
+
+    // Debug log
+    console.log(`[DEBUG] getCurrentTasks returning ${tasks.length} tasks (${binTasks.length} bins, ${serviceRequestTasks.length} SRs) for driver ${req.user.id}`);
 
     return res.status(200).json({
       message: "Current tasks retrieved successfully",
@@ -811,9 +792,37 @@ const completeTask = async (req, res) => {
     }
 
     const { notes, collection_weight } = req.body;
-    let isBinTask = false;
 
-    // Try to find in driver_tasks
+    // 1. Try to find in bin_assignments (Priority)
+    const ba = await binAssignmentModel.getAssignmentById(taskId);
+    if (ba && ba.driver_id === req.user.id) {
+      // Update assignment status
+      await binAssignmentModel.updateAssignmentStatus(taskId, 'completed', {
+        notes: notes ? JSON.stringify({ completion_notes: notes }) : null,
+        collection_weight: collection_weight,
+        completed_at: new Date().toISOString()
+      });
+
+      // Reset Bin Logic (Copied from previous fix)
+      if (ba.bin_id) {
+        try {
+          const updBinRes = await pool.query(`UPDATE bins SET fill_level = 0, status = 'filling', updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [ba.bin_id]);
+          const updatedBin = updBinRes.rows[0];
+
+          if (updatedBin && updatedBin.society) {
+            websocketService.sendToSociety(updatedBin.society, 'bins:update', [updatedBin]);
+          }
+          websocketService.sendToRole('admin', 'bins:update', [updatedBin]);
+          websocketService.sendToRole('super_admin', 'bins:update', [updatedBin]);
+        } catch (e) {
+          console.error('Failed to reset bin for assignment', taskId, e);
+        }
+      }
+      return res.status(200).json({ success: true, message: "Bin task completed" });
+    }
+
+    // 2. Fallback: driver_tasks Check
+    let isBinTask = false;
     const dtRes = await pool.query(`SELECT * FROM driver_tasks WHERE task_id = $1 AND driver_id = $2`, [taskId, req.user.id]);
     if (dtRes.rows.length > 0) isBinTask = true;
 
@@ -829,7 +838,7 @@ const completeTask = async (req, res) => {
       }
       return res.status(200).json({ success: true, message: "Bin task completed" });
     } else {
-      // Assume Service Request
+      // 3. Last resort: Service Request
       const srRes = await pool.query(`SELECT * FROM service_requests WHERE id = $1 AND driver_id = $2`, [taskId, req.user.id]);
       if (srRes.rows.length === 0) {
         return res.status(404).json({ message: "Task not found" });

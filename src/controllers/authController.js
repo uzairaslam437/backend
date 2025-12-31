@@ -225,30 +225,30 @@ const addAdminAndStaff = async (req, res) => {
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       role === "super_admin"
         ? [
-            firstName.trim(),
-            lastName.trim(),
-            username,
-            phone,
-            String(email).trim(),
-            role,
-            mfaEnabled,
-            createdBy,
-          ]
+          firstName.trim(),
+          lastName.trim(),
+          username,
+          phone,
+          String(email).trim(),
+          role,
+          mfaEnabled,
+          createdBy,
+        ]
         : [
-            firstName.trim(),
-            lastName.trim(),
-            username,
-            phone,
-            String(email).trim(),
-            role,
-            finalSocietyId,
-            mfaEnabled,
-            createdBy,
-          ]
+          firstName.trim(),
+          lastName.trim(),
+          username,
+          phone,
+          String(email).trim(),
+          role,
+          finalSocietyId,
+          mfaEnabled,
+          createdBy,
+        ]
     );
     const newUser = userInsert.rows[0];
 
-    if(currentUser.role === "sub_admin"){
+    if (currentUser.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "CREATED_STAFF",
@@ -311,7 +311,7 @@ const addAdminAndStaff = async (req, res) => {
     // If anything failed (including email), rollback so no partial user is left
     try {
       await client.query("ROLLBACK");
-    } catch (_) {}
+    } catch (_) { }
     console.error(`Error creating user: ${error.message}`);
     if (
       error.code === "EMAIL_SEND_FAILED" ||
@@ -417,7 +417,7 @@ const addResident = async (req, res) => {
     const newUser = insertUser.rows[0];
     console.log("✅ Created Resident:", newUser);
 
-    if(requesterData.role === "sub_admin"){
+    if (requesterData.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "CREATED_RESIDENT",
@@ -471,8 +471,8 @@ const signIn = async (req, res) => {
         [user.society_id]
       );
       if (societyCheck.rows.length > 0 && societyCheck.rows[0].is_blocked) {
-        return res.status(403).json({ 
-          message: "Your society has been blocked. Please contact support." 
+        return res.status(403).json({
+          message: "Your society has been blocked. Please contact support."
         });
       }
     }
@@ -558,7 +558,7 @@ const signIn = async (req, res) => {
           username: user.username,
           is_verified: user.is_verified,
           role: user.role,
-          society_id: user.society_id ? userSociety.rows[0].society_name : null,
+          society_id: user.society_id,
           requiresMFASetup: true,
           society: userSociety.rows.length > 0 ? userSociety.rows[0].society_name : null,
 
@@ -630,7 +630,7 @@ const signOut = async (req, res) => {
       refresh_token,
     ]);
 
-    if(req.user.role === "sub_admin"){
+    if (req.user.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "SIGNED_OUT",
@@ -923,8 +923,8 @@ const updateProfile = async (req, res) => {
     );
 
     console.log("Checkpoint 4");
-    
-    if(req.user.role === "sub_admin"){
+
+    if (req.user.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "UPDATED_PROFILE",
@@ -1606,7 +1606,7 @@ const updateUser = async (req, res) => {
       if (
         targetSocietyCheck.rows.length === 0 ||
         targetSocietyCheck.rows[0].society_id !==
-          adminSocietyCheck.rows[0].society_id
+        adminSocietyCheck.rows[0].society_id
       ) {
         return res
           .status(403)
@@ -1710,7 +1710,7 @@ const updateUser = async (req, res) => {
     const result = await runQuery(updateQuery, values);
 
 
-    if(req.user.role === "sub_admin"){
+    if (req.user.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "UPDATE_USER",
@@ -1799,7 +1799,7 @@ const blockUser = async (req, res) => {
       [isBlocked, userId]
     );
 
-    if(req.user.role === "sub_admin"){
+    if (req.user.role === "sub_admin") {
       await logSubAdminActivity({
         subAdmin: req.user.id,
         activityType: "BLOCK_USER",
