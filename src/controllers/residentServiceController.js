@@ -397,6 +397,20 @@ const createServiceRequest = async (req, res) => {
       [q.rows[0].id, userId]
     );
 
+    // Trigger Auto-Assignment (Async)
+    const assignmentService = require("../services/assignmentService");
+    const websocketService = require("../services/websocketService");
+
+    // We don't await this to keep response fast, or we can await if we want to return assignment status immediately.
+    // Usually better to do async for robustness, but here immediate feedback is nice.
+    // Let's do it async (fire and forget) so we don't block.
+    assignmentService.assignServiceRequest(q.rows[0].id, websocketService)
+      .then(driver => {
+        if (driver) console.log(`SR-${q.rows[0].id} assigned to ${driver.first_name}`);
+        else console.log(`SR-${q.rows[0].id} auto-assignment deferred.`);
+      })
+      .catch(e => console.error("Auto-assignment error:", e));
+
     return res.status(201).json({
       success: true,
       message: "Service request created successfully",

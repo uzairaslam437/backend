@@ -294,4 +294,139 @@ async function checkAndCompleteTask(bin, websocketService) {
   return false;
 }
 
-module.exports = { findBestDriver, assignTask, checkAndCreateTask, checkAndCompleteTask };
+async function assignServiceRequest(requestId, wsService = null) {
+  // 1. Fetch Request Details including location
+  const q = `
+    SELECT sr.*, ua.latitude, ua.longitude, u.society_id
+    FROM service_requests sr
+    JOIN user_addresses ua ON sr.address_id = ua.id
+    JOIN users u ON sr.user_id = u.id
+    WHERE sr.id = $1
+  `;
+  const res = await pool.query(q, [requestId]);
+  if (res.rowCount === 0) return null;
+  const request = res.rows[0];
+
+  // 2. Find Best Driver
+  const societyId = request.society_id;
+  const lat = parseFloat(request.latitude);
+  const lon = parseFloat(request.longitude);
+
+  let best = null;
+  try {
+    // We reuse findBestDriverAI but we need to adapt it or create a new one.
+    // Actually, findBestDriverAI is tightly coupled to bins (it expects bin object).
+    // Let's create a specialized look-up here or refactor findBestDriverAI.
+    // For now, let's replicate the logic but passing 'request' object to groqService.
+
+    const candidates = await getCandidateDrivers(societyId);
+    if (candidates && candidates.length > 0) {
+      const driversForAI = [];
+      for (const d of candidates) {
+        const loc = await getLatestLocation(d.id);
+        const workload = await getActiveTaskCount(d.id);
+        driversForAI.push({
+          id: d.id,
+          first_name: d.first_name,
+          last_name: d.last_name,
+          name: `${d.first_name || ''} ${d.last_name || ''}`.trim(),
+          latitude: loc && loc.latitude ? parseFloat(loc.latitude) : null,
+          longitude: loc && loc.longitude ? parseFloat(loc.longitude) : null,
+          recorded_at: loc ? loc.recorded_at : null,
+          active_tasks: workload,
+          society_id: d.society_id
+        });
+      }
+
+      const context = {
+        request: {
+          requestId: request.id,
+          latitude: lat,
+          longitude: lon,
+          type: 'service_request',
+          title: request.title
+        },
+        drivers: driversForAI
+      };
+
+      console.log("Requesting AI (Groq) for optimal driver for Service Request...");
+      const aiResult = await groqService.getOptimalDriver(context);
+      console.log("🤖 Groq AI Response (SR):", JSON.stringify(aiResult, null, 2));
+
+      if (aiResult && aiResult.driver_id) {
+        const candidate = driversForAI.find(c => c.id == aiResult.driver_id);
+        if (candidate) {
+          best = { driver: candidate, reason: aiResult.reason, isAI: true };
+        }
+      }
+    }
+
+  } catch (e) {
+    console.error("AI assignment failed for Service Request:", e);
+  }
+
+  if (!best) {
+    console.log(`❌ Groq did not return a suitable driver for Service Request #${requestId}.`);
+    return null;
+  }
+
+  // 3. Assign Driver
+  console.log(`✅ SERVICE REQUEST ASSIGNED: SR-${requestId} -> Driver ${best.driver.id}`);
+
+  // Update Service Request
+  await pool.query(
+    `UPDATE service_requests SET driver_id = $1, status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [best.driver.id, requestId]
+  );
+
+  // Log History
+  await pool.query(
+    `INSERT INTO service_request_status_history (service_request_id, old_status, new_status, changed_by, reason) VALUES ($1, 'pending', 'assigned', null, $2)`,
+    [requestId, `Auto-assigned by Groq AI: ${best.reason}`]
+  );
+
+  // Log Task Event (for unified logging)
+  // We don't have a 'task_id' in tasks table for this, but we want it in system logs.
+  // The system logs query joins on tasks table. 
+  // IMPORTANT: The user wants "Task Assignments" section to display "both bins and service requests".
+  // The current "Task Assignments" query in logController.js `getTaskLogs` joins on `tasks` table.
+  // We can either:
+  // A) Create a dummy task in `tasks` table for this service request (adapter pattern).
+  // B) Update `getTaskLogs` to union `service_request_status_history` or similar.
+  // C) Insert into `task_events` with a null task_id? No, `task_id` is NOT NULL usually or acts as FK.
+
+  // Let's check `task_events` schema in `20251205000000_create_tasks_and_driver_tables.js`:
+  // `task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE`
+  // So we cannot insert into `task_events` without a task.
+
+  // To unify them easily on frontend without massive refactor, creating a "shadow task" in `tasks` table seems cleanest 
+  // but `tasks` table requires `bin_id`. `bin_id` can be NULL? 
+  // `bin_id INTEGER REFERENCES bins(id) ON DELETE SET NULL` -> Yes, can be null.
+
+  // Let's create a wrapper task in `tasks` table so it shows up in logs and driver standard task flow if needed.
+  // BUT the user said "Service requests... assigned to driver... displayed on driver screen". 
+  // If we map it to a `task`, we get `driver_tasks` handling for free?
+  // `driver_tasks` links to `tasks`.
+
+  // However, `service_requests` table exists separate from `tasks`.
+  // If we mirror it to `tasks`, we have two sources of truth. 
+  // The user requirement says: "display both bins and service requests" in logs.
+
+  // Let's stick to updating `service_requests` and handle the "Backend: Mobile: Display assigned tasks" by querying both tables in `driverController.js`.
+
+  // For Logs: We will update `logController.js` to UNION the results.
+
+  // Notify Driver via WebSocket
+  if (wsService) {
+    wsService.sendToUser(best.driver.id, 'service_requests:assigned', {
+      id: requestId,
+      title: request.title,
+      latitude: lat,
+      longitude: lon
+    });
+  }
+
+  return best.driver;
+}
+
+module.exports = { findBestDriver, assignTask, checkAndCreateTask, checkAndCompleteTask, assignServiceRequest };

@@ -1,5 +1,10 @@
-const GROQ_API_URL = process.env.GROQ_API_URL || '';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+let GROQ_API_URL = process.env.GROQ_API_URL;
+
+// Fallback to default if URL is missing or looks like a key (common user error)
+if (!GROQ_API_URL || GROQ_API_URL.startsWith('gsk_')) {
+  GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+}
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
 function extractJson(text) {
@@ -84,15 +89,20 @@ function buildDriverPrompt(context) {
   const driversList = (drivers || []).map(d => `- id: ${d.id}, name: ${d.name || (d.first_name + ' ' + (d.last_name || ''))}, latitude: ${d.latitude}, longitude: ${d.longitude}, active_tasks: ${d.active_tasks}`).join('\n');
   const allowedIds = (drivers || []).map(d => d.id).join(', ');
 
-  return `You are a strict decision engine for assigning one driver to empty a bin.\n\nCONTEXT:\nBin: ${JSON.stringify(bin)}\n\nCANDIDATE DRIVERS:\n${driversList}\n\nREQUIREMENTS:\n- Choose exactly one driver from the candidate 
-  list above.\n- PRIORITIZE PROXIMITY: Calculate rough distances based on latitude/longitude. Choose the driver closest to the bin who has low active tasks.\n- If a driver is very far (>20km) avoid them unless no one else is available.\n- The returned JSON MUST be the ONLY content.\n- Return EXACTLY this JSON shape:\n  { "driver_id":
-   <one of: ${allowedIds} | null>, "reason": "brief explanation (max 30 words)" }\n- If no suitable driver, set "driver_id" to null.\n\nEXAMPLE:\n  { "driver_id": ${allowedIds.split(', ')[0] || 'null'}, "reason": 
-   "Closest available driver (0.5km away)" }\n\nReturn only the JSON object.`;
+  return `You are a strict decision engine for assigning one driver to empty a bin.\n\nCONTEXT:\nBin: ${JSON.stringify(bin)}\n\nCANDIDATE DRIVERS:\n${driversList}\n\nREQUIREMENTS:\n- Choose exactly one driver from the candidate \n  list above.\n- PRIORITIZE PROXIMITY: Calculate rough distances based on latitude/longitude. Choose the driver closest to the bin who has low active tasks.\n- If a driver is very far (>20km) avoid them unless no one else is available.\n- The returned JSON MUST be the ONLY content.\n- Return EXACTLY this JSON shape:\n  { "driver_id":\n    <one of: ${allowedIds} | null>, "reason": "brief explanation (max 30 words)" }\n- If no suitable driver, set "driver_id" to null.\n\nEXAMPLE:\n  { "driver_id": ${allowedIds.split(', ')[0] || 'null'}, "reason": \n    "Closest available driver (0.5km away)" }\n\nReturn only the JSON object.`;
+}
+
+function buildServiceRequestDriverPrompt(context) {
+  const { request, drivers } = context || {};
+  const driversList = (drivers || []).map(d => `- id: ${d.id}, name: ${d.name || (d.first_name + ' ' + (d.last_name || ''))}, latitude: ${d.latitude}, longitude: ${d.longitude}, active_tasks: ${d.active_tasks}`).join('\n');
+  const allowedIds = (drivers || []).map(d => d.id).join(', ');
+
+  return `You are a strict decision engine for assigning one driver to a resident service request.\n\nCONTEXT:\nRequest: ${JSON.stringify(request)}\n\nCANDIDATE DRIVERS:\n${driversList}\n\nREQUIREMENTS:\n- Choose exactly one driver from the candidate list above.\n- PRIORITIZE PROXIMITY: Calculate rough distances between driver and request location. Choose the driver closest to the request location who has low active tasks.\n- If a driver is very far (>20km) avoid them unless no one else is available.\n- The returned JSON MUST be the ONLY content.\n- Return EXACTLY this JSON shape:\n  { "driver_id": <one of: ${allowedIds} | null>, "reason": "brief explanation (max 30 words)" }\n- If no suitable driver, set "driver_id" to null.\n\nReturn only the JSON object.`;
 }
 
 async function getOptimalDriver(context) {
   try {
-    const prompt = buildDriverPrompt(context);
+    const prompt = context.request ? buildServiceRequestDriverPrompt(context) : buildDriverPrompt(context);
     const resp = await callGroq(prompt);
 
     if (resp.json && resp.json.error) {
